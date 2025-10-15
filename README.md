@@ -12,10 +12,9 @@ Inspired by genetic evolution (like Lion) and second-order methods (like Sophia)
 
 ### Installation
 ```bash
-pip install prodigyultra
-# Or from source
-git clone https://github.com/ryospiralarchitect/prodigyultra.git
-cd prodigyultra
+
+git clone https://github.com/ryospiralarchitect/ProdigyUltraX-SR.git
+ProdigyUltraX-SR
 pip install -e .
 ```
 
