@@ -1,6 +1,6 @@
 # ProdigyUltra: Next-Gen Optimizer for Transformer Pre-Training 🚀
 
-[![PyPI version](https://badge.fury.io/py/prodigyultra.svg)](https://badge.fury.io/py/prodigyultra) [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Stars](https://img.shields.io/github/stars/ryospiralarchitect/prodigyultra?style=social)](https://github.com/ryospiralarchitect/prodigyultra)
+[![PyPI version](https://badge.fury.io/py/prodigyultra.svg)](https://badge.fury.io/py/prodigyultra) [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Stars](https://img.shields.io/github/stars/ryospiralarchitect/prodigyultra?style=social)]
 
 **ProdigyUltra** is a cutting-edge PyTorch optimizer that redefines efficiency for large language models (LLMs) and Transformers. Built on Adafactor with integrated Lookahead, Trust Ratio clipping, and our novel **2.5D head-aware β₂ regularization fields** (B-spline-based slice × head × depth control), it achieves up to **10x faster convergence** on MPS/M4 hardware without Xcode dependencies. Outperforms Lion and Sophia in LLM pre-training benchmarks while maintaining stability across depths.
 
