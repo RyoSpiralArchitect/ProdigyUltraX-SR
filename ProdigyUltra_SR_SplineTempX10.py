@@ -337,7 +337,7 @@ def _eval_spatial_profile_conv(kH: int, kW: int, spec: dict, depth_norm: float, 
     dev = device or torch.device("cpu")
     lo = float(spec.get("min", 0.0)); hi = float(spec.get("max", 1.0))
     combine = str(spec.get("combine", "mul")).lower()
-    depth = spec.get("depth", None)  # {"degree":.., "ctrl":[...], "knots":..}
+    depth = spec.get("depth", None)  # expects dict with degree/ctrl/knots keys
     if depth:
         y_d = _bspline_profile_1d(1, int(depth.get("degree",1)), depth.get("ctrl",[1.0,1.0]), knots=depth.get("knots",None), device=dev)[0]
     else:
@@ -1232,7 +1232,7 @@ class ProdigyUltra(Optimizer):
                 try:
                     L = torch.linalg.cholesky(Cov)
                     delta_new = (phi - mu_new).unsqueeze(-1)
-                    z = torch.linalg.solve_triangular(L, delta_new, upper=False).squeeze(-1)
+                    z = torch.linalg.solve(L, delta_new).squeeze(-1)
                 except (RuntimeError, ValueError):
                     z = torch.zeros_like(phi)
 
