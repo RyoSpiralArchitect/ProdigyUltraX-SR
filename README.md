@@ -90,7 +90,7 @@ Tested on SlimPajama (60B tokens, GPT-2 Medium) with A100/M4 hardware. ProdigyUl
 | Sophia | 2.51 | 15.8 | 22 | 0.45 |
 | AdamW | 2.72 | 22.1 | 20 | N/A |
 
-*Source: Internal M4 benchmarks (2025). See [reproduce script](benchmarks/slimpajama.py).*
+*Source: Internal M4 benchmarks (2025). 
 
 Hyperparam tips: Start with `lr=3e-4`, `rho=0.01` for Sophia-like clipping; tune β₂ fields via `qkv_beta2_reg_depth_head_bspline_field_map`.
 
