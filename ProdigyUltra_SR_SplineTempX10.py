@@ -134,12 +134,44 @@ def _bspline_profile_1d(length: int, degree: int, ctrl: List[float], knots=None,
     y = (B @ ctrl.view(-1,1)).squeeze(1).to(torch.float32)
     return y
 
+
+def _beta2_bounds(spec, default_min: float = 0.95, default_max: float = 0.9999) -> Tuple[float, float]:
+    if isinstance(spec, dict):
+        lo = float(spec.get("min", default_min))
+        hi = float(spec.get("max", default_max))
+        return lo, hi
+    return float(default_min), float(default_max)
+
+
+def _resolve_per_key_spec(spec_map, key: str):
+    if not isinstance(spec_map, dict):
+        return spec_map
+    base_keys = {"q", "k", "v", "default"}
+    base = {k: v for k, v in spec_map.items() if k not in base_keys}
+    override = None
+    entry = spec_map.get(key)
+    if isinstance(entry, dict):
+        override = entry
+    else:
+        default_entry = spec_map.get("default")
+        if isinstance(default_entry, dict):
+            override = default_entry
+    if override is None:
+        return spec_map
+    resolved = dict(base)
+    resolved.update(override)
+    return resolved
+
 # ─────────────────────────────────────────────────────────────────────────────
 # β2 column head-aware profiles
 # ─────────────────────────────────────────────────────────────────────────────
 def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth_norm: float, *, device=None) -> torch.Tensor:
     """Return length-c_len β2 over columns, split into H head bands."""
     dev = device or torch.device("cpu")
+    if isinstance(spec, dict):
+        spec = _resolve_per_key_spec(spec, key)
+        if not isinstance(spec, dict):
+            spec = {}
     lo = float(spec.get("min", 0.0)); hi = float(spec.get("max", 1.0))
     combine = str(spec.get("combine", "mul")).lower()
     # depth scalar per slice
@@ -154,7 +186,10 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         if m - 2*deg_d > 0:
             kd[deg_d+1:-deg_d-1] = torch.linspace(0.0, 1.0, steps=m-2*deg_d+1, device=dev, dtype=torch.float64)[1:-1]
     else:
-        kd = kd_in[key] if isinstance(kd_in, dict) else kd_in
+        if isinstance(kd_in, dict):
+            kd = kd_in.get(key, None)
+        else:
+            kd = kd_in
         kd = torch.tensor(kd, dtype=torch.float64, device=dev)
         if not normalized:
             kmin, kmax = float(kd.min().item()), float(kd.max().item())
@@ -175,7 +210,10 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         if m - 2*deg_h > 0:
             kh[deg_h+1:-deg_h-1] = torch.linspace(0.0, 1.0, steps=m-2*deg_h+1, device=dev, dtype=torch.float64)[1:-1]
     else:
-        kh = kh_in[key] if isinstance(kh_in, dict) else kh_in
+        if isinstance(kh_in, dict):
+            kh = kh_in.get(key, None)
+        else:
+            kh = kh_in
         kh = torch.tensor(kh, dtype=torch.float64, device=dev)
         if not hnorm:
             kmin, kmax = float(kh.min().item()), float(kh.max().item())
@@ -200,7 +238,10 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         end = c_len if h == H-1 else (start + band)
         length = max(1, end - start)
         c_ctrl = c_ctrl_map.get(key, [1.0,1.0])
-        kc = kc_in[key] if isinstance(kc_in, dict) else kc_in
+        if isinstance(kc_in, dict):
+            kc = kc_in.get(key, None)
+        else:
+            kc = kc_in
         ycol = _bspline_profile_1d(length, deg_c, c_ctrl, knots=kc, normalized=cnorm, device=dev).to(torch.float32)
         if combine == "add":
             vec = ycol + (yd * yh[h])
@@ -209,6 +250,85 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         out[start:end] = vec.clamp(lo, hi)
         pos = end
     return out
+
+
+def _eval_depth_col_profile(spec_map: dict, key: str, length: int, depth_norm: float, *, device=None) -> torch.Tensor:
+    """Fallback evaluator for depth×column β2 fields (no head split)."""
+    dev = device or torch.device("cpu")
+    if spec_map is None:
+        return torch.ones(length, dtype=torch.float32, device=dev)
+
+    spec = _resolve_per_key_spec(spec_map, key)
+    if not isinstance(spec, dict):
+        spec = {}
+
+    # If the provided spec already contains the richer head-aware layout, reuse it.
+    if isinstance(spec, dict) and ("head" in spec or "col" in spec):
+        return _eval_depth_head_col_profile(length, 1, spec, key, depth_norm, device=dev)
+
+    lo = float(spec.get("min", 0.0)) if isinstance(spec, dict) else 0.0
+    hi = float(spec.get("max", 1.0)) if isinstance(spec, dict) else 1.0
+    combine = str(spec.get("combine", "mul")).lower() if isinstance(spec, dict) else "mul"
+
+    def _resolve_ctrl(ctrl_spec, default):
+        if isinstance(ctrl_spec, dict):
+            return ctrl_spec.get(key, ctrl_spec.get("default", default))
+        if ctrl_spec is None:
+            return default
+        return ctrl_spec
+
+    knots = None
+    deg = 2
+    normalized = True
+    if isinstance(spec, dict):
+        deg = int(spec.get("degree", deg))
+        normalized = bool(spec.get("normalized", normalized))
+        knots_in = spec.get("knots", None)
+        if isinstance(knots_in, dict):
+            knots = knots_in.get(key, None)
+        else:
+            knots = knots_in
+        ctrl_vals = _resolve_ctrl(spec.get("ctrl", None), [1.0, 1.0])
+    else:
+        ctrl_vals = [1.0, 1.0]
+
+    if not isinstance(ctrl_vals, (list, tuple)):
+        ctrl_vals = [float(ctrl_vals)] * 2
+
+    col_curve = _bspline_profile_1d(length, int(deg), list(ctrl_vals), knots=knots, normalized=normalized, device=dev)
+
+    depth_spec = spec.get("depth", None) if isinstance(spec, dict) else None
+    if depth_spec is not None:
+        deg_d = int(depth_spec.get("degree", 3))
+        kd_in = depth_spec.get("knots", None)
+        if isinstance(kd_in, dict):
+            kd = kd_in.get(key, None)
+        else:
+            kd = kd_in
+        ctrl_d = _resolve_ctrl(depth_spec.get("ctrl", None), [1.0, 1.0])
+        if not isinstance(ctrl_d, (list, tuple)):
+            ctrl_d = [float(ctrl_d)] * 2
+        ctrl_d = torch.tensor([float(c) for c in ctrl_d], dtype=torch.float64, device=dev)
+        if kd is None:
+            m = (ctrl_d.numel() - 1) + deg_d + 1
+            kd = torch.zeros(m + 1, dtype=torch.float64, device=dev)
+            kd[:deg_d + 1] = 0.0
+            kd[-(deg_d + 1):] = 1.0
+            if m - 2 * deg_d > 0:
+                kd[deg_d + 1:-deg_d - 1] = torch.linspace(0.0, 1.0, steps=m - 2 * deg_d + 1, device=dev, dtype=torch.float64)[1:-1]
+        else:
+            kd = torch.tensor(kd, dtype=torch.float64, device=dev)
+            if not bool(depth_spec.get("normalized", True)) and kd.numel() > 0:
+                kmin, kmax = float(kd.min().item()), float(kd.max().item())
+                kd = (kd - kmin) / max(1e-12, (kmax - kmin))
+        Bd = _bspline_basis_all(torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev), deg_d, kd)
+        depth_val = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
+    else:
+        depth_val = torch.tensor(1.0, dtype=torch.float32, device=dev)
+
+    col_curve = col_curve.to(torch.float32)
+    vec = col_curve + depth_val if combine == "add" else col_curve * depth_val
+    return vec.clamp(lo, hi)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Spatial profile with dilation awareness
@@ -653,18 +773,24 @@ class ProdigyUltra(Optimizer):
         self._ext_val_loss = None
         self._ext_val_acc = None
         for g in self.param_groups:
+            ref_param = next((p for p in g["params"] if isinstance(p, torch.nn.Parameter)), None)
+            ref_device = ref_param.device if ref_param is not None else torch.device("cpu")
+            if ref_param is not None and ref_param.is_floating_point():
+                ref_dtype = torch.float32 if ref_param.dtype in (torch.float16, torch.bfloat16) else ref_param.dtype
+            else:
+                ref_dtype = torch.float32
             g["_init_lr"] = g["lr"]
             g["_mp_cache_step"] = -1
             g["loss_ema"] = None; g["val_ema"] = None; g["acc_ema"] = None
             # whitening state
-            g["_phi_mu"] = torch.zeros(5, dtype=torch.float64)
-            g["_phi_cov"] = torch.eye(5, dtype=torch.float64) * 1e-2
+            g["_phi_mu"] = torch.zeros(5, dtype=ref_dtype, device=ref_device)
+            g["_phi_cov"] = torch.eye(5, dtype=ref_dtype, device=ref_device) * 1e-2
             g["_phi_beta"] = 0.95  # EMA factor
             g["_g_vec"] = torch.tensor([g.get("lookahead_temp_phase_warm_gain",0.3),
                                         g.get("lookahead_temp_phase_lr_gain",0.25),
                                         g.get("lookahead_temp_phase_ext_gain",0.0),
                                         g.get("lookahead_temp_phase_r_gain",0.0),
-                                        g.get("lookahead_temp_phase_rms_gain",0.0)], dtype=torch.float64)
+                                        g.get("lookahead_temp_phase_rms_gain",0.0)], dtype=ref_dtype, device=ref_device)
 
     def set_ext_metrics(self, *, loss: Optional[float] = None, val_loss: Optional[float] = None, val_acc: Optional[float] = None):
         if loss is not None: self._ext_loss = float(loss)
@@ -700,14 +826,18 @@ class ProdigyUltra(Optimizer):
                         # optional per-head REG for columns（L2/TV 同一係数で OK）
                         reg_head = (qkv_b2_reg_head_col_map or {}).get(key, None)
                         if reg_head is not None:
-                            vec = _regularize_field_1d(vec, float(qkv_b2_value_head_col_spec.get("min",0.95)), float(qkv_b2_value_head_col_spec.get("max",0.9999)), reg_head)
+                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_head_col_spec, key)
+                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+                            vec = _regularize_field_1d(vec, lo_b2, hi_b2, reg_head)
                         vc.mul_(vec).addcmul_(gfc, gfc, value=(1.0 - vec))
                         out = gfc / (vc.sqrt() + eps2)
                     elif dim == 1 and qkv_b2_value_col_spec is not None:
                         b2_vec = _eval_depth_col_profile(qkv_b2_value_col_spec, key, gfc.shape[1], depth_norm, device=gfc.device)
                         reg_spec = (qkv_b2_reg_col_spec or {}).get(key, None)
                         if reg_spec is not None:
-                            b2_vec = _regularize_field_1d(b2_vec, float(qkv_b2_value_col_spec.get("min",0.95)), float(qkv_b2_value_col_spec.get("max",0.9999)), reg_spec)
+                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_col_spec, key)
+                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_spec)
                         vc.mul_(b2_vec).addcmul_(gfc, gfc, value=(1.0 - b2_vec))
                         out = gfc / (vc.sqrt() + eps2)
                     elif qkv_b2_field and key in qkv_b2_field:
@@ -779,13 +909,17 @@ class ProdigyUltra(Optimizer):
                         b2_vec = _eval_depth_head_col_profile(ecol-scol, H, qkv_b2_value_head_col_spec, key, depth_norm, device=vc.device)
                         reg_head = (qkv_b2_reg_head_col_map or {}).get(key, None)
                         if reg_head is not None:
-                            b2_vec = _regularize_field_1d(b2_vec, float(qkv_b2_value_head_col_spec.get("min",0.95)), float(qkv_b2_value_head_col_spec.get("max",0.9999)), reg_head)
+                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_head_col_spec, key)
+                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_head)
                         vc[scol:ecol] = vc[scol:ecol] * b2_vec + mean_c[scol:ecol] * (1.0 - b2_vec)
                     elif qkv_b2_value_col_spec is not None:
                         b2_vec = _eval_depth_col_profile(qkv_b2_value_col_spec, key, ecol-scol, depth_norm, device=vc.device)
                         reg_spec = (qkv_b2_reg_col_spec or {}).get(key, None)
                         if reg_spec is not None:
-                            b2_vec = _regularize_field_1d(b2_vec, float(qkv_b2_value_col_spec.get("min",0.95)), float(qkv_b2_value_col_spec.get("max",0.9999)), reg_spec)
+                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_col_spec, key)
+                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_spec)
                         vc[scol:ecol] = vc[scol:ecol] * b2_vec + mean_c[scol:ecol] * (1.0 - b2_vec)
                     elif qkv_b2_field and key in qkv_b2_field:
                         spec = qkv_b2_field[key]; reg = (qkv_b2_reg or {}).get(key, None)
@@ -1085,20 +1219,22 @@ class ProdigyUltra(Optimizer):
                     phi_u = 0.0
 
                 # online whitening（5-dim）
-                phi = torch.tensor([phi_w, phi_l, phi_e, phi_r, phi_u], dtype=torch.float64)
+                stats_device = group["_phi_mu"].device
+                stats_dtype = group["_phi_mu"].dtype
+                phi = torch.tensor([phi_w, phi_l, phi_e, phi_r, phi_u], dtype=stats_dtype, device=stats_device)
                 mu = group["_phi_mu"]; C = group["_phi_cov"]; beta = float(group["_phi_beta"])
                 mu_new = beta * mu + (1-beta) * phi
                 delta = (phi - mu).unsqueeze(1)
                 C_new = beta * C + (1-beta) * (delta @ delta.T)
                 group["_phi_mu"] = mu_new; group["_phi_cov"] = C_new
                 # inv sqrt via Cholesky on diag-boosted covariance
-                Cov = C_new + torch.eye(5, dtype=torch.float64) * 1e-6
+                Cov = C_new + torch.eye(5, dtype=stats_dtype, device=stats_device) * 1e-6
                 try:
                     L = torch.linalg.cholesky(Cov)
-                    Linv = torch.cholesky_inverse(L)
-                except Exception:
-                    Linv = torch.eye(5, dtype=torch.float64)
-                z = (Linv @ (phi - mu_new))  # whitened components
+                    delta_new = (phi - mu_new).unsqueeze(-1)
+                    z = torch.linalg.solve_triangular(L, delta_new, upper=False).squeeze(-1)
+                except (RuntimeError, ValueError):
+                    z = torch.zeros_like(phi)
 
                 # adaptive gains
                 g_vec = group["_g_vec"]
