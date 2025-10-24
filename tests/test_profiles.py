@@ -63,6 +63,33 @@ def test_eval_spatial_profile_conv_honors_normalized_and_depth_norm():
     torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
 
 
+def test_eval_spatial_profile_conv_skips_rescale_for_absolute_depth_input():
+    spec = {
+        "min": 0.0,
+        "max": 10.0,
+        "depth": {
+            "degree": 1,
+            "ctrl": [1.0, 3.0],
+            "knots": [0.0, 1.0, 2.0, 3.0],
+            "normalized": False,
+        },
+        "combine": "mul",
+        "kh": {"degree": 0, "ctrl": [1.0], "normalized": True},
+        "kw": {"degree": 0, "ctrl": [2.0], "normalized": True},
+    }
+    depth_norm = 2.5  # already in absolute coordinates; should not be rescaled.
+    result = _eval_spatial_profile_conv(1, 1, spec, depth_norm=depth_norm)
+
+    depth_knots = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+    depth_ctrl = torch.tensor([1.0, 3.0], dtype=torch.float64)
+    depth_sample = torch.tensor([depth_norm], dtype=torch.float64)
+    depth_basis = _bspline_basis_all(depth_sample, 1, depth_knots)
+    depth_val = (depth_basis @ depth_ctrl.view(-1, 1)).squeeze(1).to(torch.float32)[0]
+
+    expected = torch.tensor([2.0 * depth_val], dtype=torch.float32)
+    torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
+
+
 def test_eval_conv_row_channel_profile_honors_normalized_and_depth_norm():
     spec = {
         "min": 0.0,
@@ -108,4 +135,32 @@ def test_eval_conv_row_channel_profile_honors_normalized_and_depth_norm():
     depth_val = (_bspline_basis_all(depth_sample, 1, depth_knots) @ depth_ctrl.view(-1, 1)).squeeze(1).to(torch.float32)[0]
 
     expected = (out_vals.view(-1, 1) * in_vals.view(1, -1)).reshape(-1) * depth_val
+    torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
+
+
+def test_eval_conv_row_channel_profile_skips_rescale_for_absolute_depth_input():
+    spec = {
+        "min": 0.0,
+        "max": 10.0,
+        "out": {"degree": 0, "ctrl": [1.5], "normalized": True},
+        "in": {"degree": 0, "ctrl": [2.0], "normalized": True},
+        "depth": {
+            "degree": 1,
+            "ctrl": [1.0, 4.0],
+            "knots": [0.0, 0.5, 1.0, 1.5],
+            "normalized": False,
+        },
+        "combine": "mul",
+    }
+    depth_norm = 1.25
+    result = _eval_conv_row_channel_profile(1, 1, spec, depth_norm=depth_norm)
+
+    depth_knots = torch.tensor([0.0, 0.5, 1.0, 1.5], dtype=torch.float64)
+    depth_ctrl = torch.tensor([1.0, 4.0], dtype=torch.float64)
+    depth_sample = torch.tensor([depth_norm], dtype=torch.float64)
+    depth_val = (
+        _bspline_basis_all(depth_sample, 1, depth_knots) @ depth_ctrl.view(-1, 1)
+    ).squeeze(1).to(torch.float32)[0]
+
+    expected = torch.tensor([1.5 * 2.0 * depth_val], dtype=torch.float32)
     torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))

@@ -82,6 +82,38 @@ def _bspline_domain_from_knots(knots: torch.Tensor, degree: int) -> Tuple[float,
 
     return lo, hi
 
+
+def _maybe_scale_samples_for_knots(
+    samples: torch.Tensor,
+    knots: torch.Tensor,
+    degree: int,
+    *,
+    normalized: bool,
+    assume_normalized_input: bool,
+) -> torch.Tensor:
+    """Rescale *samples* into the spline domain when knots live in absolute coordinates."""
+
+    if normalized:
+        return samples
+    if knots.numel() == 0:
+        return samples
+
+    lo, hi = _bspline_domain_from_knots(knots, degree)
+    if hi <= lo:
+        return samples
+
+    if assume_normalized_input:
+        eps = 1e-6
+        if samples.numel() == 0:
+            return samples
+        # Skip rescaling when the caller already supplies absolute coordinates.
+        s_min = float(samples.min().item())
+        s_max = float(samples.max().item())
+        if s_min < -eps or s_max > 1.0 + eps:
+            return samples
+
+    return samples * (hi - lo) + lo
+
 _DEPTH_PAT = re.compile(r"(?:layers?|blocks?|stages?|h|enc(?:oder)?|dec(?:oder)?)[._-]?(\d+)", re.IGNORECASE)
 _INT_PAT   = re.compile(r"(\d+)")
 
@@ -164,10 +196,13 @@ def _bspline_profile_1d(length: int, degree: int, ctrl: List[float], knots=None,
             )[1:-1]
     else:
         k = torch.tensor(knots, dtype=torch.float64, device=dev)
-        if not normalized and k.numel() > 0:
-            lo, hi = _bspline_domain_from_knots(k, degree)
-            if hi > lo:
-                xs = xs * (hi - lo) + lo
+    xs = _maybe_scale_samples_for_knots(
+        xs,
+        k,
+        int(degree),
+        normalized=bool(normalized),
+        assume_normalized_input=False,
+    )
     B = _bspline_basis_all(xs, int(degree), k)
     y = (B @ ctrl.view(-1,1)).squeeze(1).to(torch.float32)
     return y
@@ -231,10 +266,13 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
             kd = kd_in
         kd = torch.tensor(kd, dtype=torch.float64, device=dev)
     sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
-    if not normalized and kd.numel() > 0:
-        lo, hi = _bspline_domain_from_knots(kd, deg_d)
-        if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
-            sample_depth = sample_depth * (hi - lo) + lo
+    sample_depth = _maybe_scale_samples_for_knots(
+        sample_depth,
+        kd,
+        deg_d,
+        normalized=bool(normalized),
+        assume_normalized_input=True,
+    )
     Bd = _bspline_basis_all(sample_depth, deg_d, kd)
     yd = (Bd @ ctrl_d.view(-1,1)).squeeze(1).to(torch.float32)[0]
 
@@ -257,10 +295,13 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
             kh = kh_in
         kh = torch.tensor(kh, dtype=torch.float64, device=dev)
     xs_h = torch.linspace(0.0, 1.0, steps=max(1,int(H)), device=dev, dtype=torch.float64)
-    if not hnorm and kh.numel() > 0:
-        lo, hi = _bspline_domain_from_knots(kh, deg_h)
-        if hi > lo:
-            xs_h = xs_h * (hi - lo) + lo
+    xs_h = _maybe_scale_samples_for_knots(
+        xs_h,
+        kh,
+        deg_h,
+        normalized=bool(hnorm),
+        assume_normalized_input=False,
+    )
     Bh = _bspline_basis_all(xs_h, deg_h, kh)
     yh = (Bh @ h_ctrl.view(-1,1)).squeeze(1).to(torch.float32)  # (H,)
 
@@ -363,10 +404,13 @@ def _eval_depth_col_profile(spec_map: dict, key: str, length: int, depth_norm: f
         else:
             kd = torch.tensor(kd, dtype=torch.float64, device=dev)
         sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
-        if not normalized_depth and kd.numel() > 0:
-            lo, hi = _bspline_domain_from_knots(kd, deg_d)
-            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
-                sample_depth = sample_depth * (hi - lo) + lo
+        sample_depth = _maybe_scale_samples_for_knots(
+            sample_depth,
+            kd,
+            deg_d,
+            normalized=bool(normalized_depth),
+            assume_normalized_input=True,
+        )
         Bd = _bspline_basis_all(sample_depth, deg_d, kd)
         depth_val = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
@@ -403,10 +447,13 @@ def _eval_spatial_profile_conv(kH: int, kW: int, spec: dict, depth_norm: float, 
         else:
             kd = torch.tensor(kd, dtype=torch.float64, device=dev)
         sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
-        if not normalized_depth and kd.numel() > 0:
-            lo, hi = _bspline_domain_from_knots(kd, deg_d)
-            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
-                sample_depth = sample_depth * (hi - lo) + lo
+        sample_depth = _maybe_scale_samples_for_knots(
+            sample_depth,
+            kd,
+            deg_d,
+            normalized=bool(normalized_depth),
+            assume_normalized_input=True,
+        )
         Bd = _bspline_basis_all(sample_depth, deg_d, kd)
         y_d = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
@@ -496,10 +543,13 @@ def _eval_conv_row_channel_profile(out_ch: int, in_ch_g: int, spec: dict, depth_
         else:
             kd = torch.tensor(kd, dtype=torch.float64, device=dev)
         sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
-        if not normalized_depth and kd.numel() > 0:
-            lo, hi = _bspline_domain_from_knots(kd, deg_d)
-            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
-                sample_depth = sample_depth * (hi - lo) + lo
+        sample_depth = _maybe_scale_samples_for_knots(
+            sample_depth,
+            kd,
+            deg_d,
+            normalized=bool(normalized_depth),
+            assume_normalized_input=True,
+        )
         Bd = _bspline_basis_all(sample_depth, deg_d, kd)
         y_d = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
