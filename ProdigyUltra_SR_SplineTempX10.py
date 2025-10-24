@@ -339,14 +339,35 @@ def _eval_spatial_profile_conv(kH: int, kW: int, spec: dict, depth_norm: float, 
     combine = str(spec.get("combine", "mul")).lower()
     depth = spec.get("depth", None)  # expects dict with degree/ctrl/knots keys
     if depth:
-        y_d = _bspline_profile_1d(1, int(depth.get("degree",1)), depth.get("ctrl",[1.0,1.0]), knots=depth.get("knots",None), device=dev)[0]
+        y_d = _bspline_profile_1d(
+            1,
+            int(depth.get("degree", 1)),
+            depth.get("ctrl", [1.0, 1.0]),
+            knots=depth.get("knots", None),
+            normalized=bool(depth.get("normalized", True)),
+            device=dev,
+        )[0]
     else:
         y_d = torch.tensor(1.0, dtype=torch.float32, device=dev)
 
     kh_spec = spec.get("kh", {"degree":1, "ctrl":[1.0,1.0]})
     kw_spec = spec.get("kw", {"degree":1, "ctrl":[1.0,1.0]})
-    y_h = _bspline_profile_1d(kH, int(kh_spec.get("degree",1)), kh_spec.get("ctrl",[1.0,1.0]), knots=kh_spec.get("knots",None), device=dev)
-    y_w = _bspline_profile_1d(kW, int(kw_spec.get("degree",1)), kw_spec.get("ctrl",[1.0,1.0]), knots=kw_spec.get("knots",None), device=dev)
+    y_h = _bspline_profile_1d(
+        kH,
+        int(kh_spec.get("degree", 1)),
+        kh_spec.get("ctrl", [1.0, 1.0]),
+        knots=kh_spec.get("knots", None),
+        normalized=bool(kh_spec.get("normalized", True)),
+        device=dev,
+    )
+    y_w = _bspline_profile_1d(
+        kW,
+        int(kw_spec.get("degree", 1)),
+        kw_spec.get("ctrl", [1.0, 1.0]),
+        knots=kw_spec.get("knots", None),
+        normalized=bool(kw_spec.get("normalized", True)),
+        device=dev,
+    )
 
     mat = (y_h.view(kH,1) * y_w.view(1,kW)).reshape(-1).to(torch.float32)
 
@@ -376,12 +397,33 @@ def _eval_conv_row_channel_profile(out_ch: int, in_ch_g: int, spec: dict, depth_
     combine = str(spec.get("combine", "mul")).lower()
     out_sp = spec.get("out", {"degree":2,"ctrl":[1.0,1.0]})
     in_sp  = spec.get("in",  {"degree":2,"ctrl":[1.0,1.0]})
-    y_out = _bspline_profile_1d(out_ch, int(out_sp.get("degree",2)), out_sp.get("ctrl",[1.0,1.0]), knots=out_sp.get("knots",None), device=dev)
-    y_in  = _bspline_profile_1d(in_ch_g, int(in_sp.get("degree",2)),  in_sp.get("ctrl",[1.0,1.0]),  knots=in_sp.get("knots",None),  device=dev)
+    y_out = _bspline_profile_1d(
+        out_ch,
+        int(out_sp.get("degree", 2)),
+        out_sp.get("ctrl", [1.0, 1.0]),
+        knots=out_sp.get("knots", None),
+        normalized=bool(out_sp.get("normalized", True)),
+        device=dev,
+    )
+    y_in = _bspline_profile_1d(
+        in_ch_g,
+        int(in_sp.get("degree", 2)),
+        in_sp.get("ctrl", [1.0, 1.0]),
+        knots=in_sp.get("knots", None),
+        normalized=bool(in_sp.get("normalized", True)),
+        device=dev,
+    )
     mat = (y_out.view(out_ch,1) * y_in.view(1,in_ch_g)).reshape(-1).to(torch.float32)
     depth = spec.get("depth", None)
     if depth:
-        y_d = _bspline_profile_1d(1, int(depth.get("degree",1)), depth.get("ctrl",[1.0,1.0]), knots=depth.get("knots",None), device=dev)[0]
+        y_d = _bspline_profile_1d(
+            1,
+            int(depth.get("degree", 1)),
+            depth.get("ctrl", [1.0, 1.0]),
+            knots=depth.get("knots", None),
+            normalized=bool(depth.get("normalized", True)),
+            device=dev,
+        )[0]
     else:
         y_d = torch.tensor(1.0, dtype=torch.float32, device=dev)
     vec = mat * y_d if combine == "mul" else (mat + y_d)
