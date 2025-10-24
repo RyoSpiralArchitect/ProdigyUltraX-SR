@@ -52,6 +52,36 @@ _NORM_TYPES = (
 )
 _CONV_TYPES = (nn.Conv1d, nn.Conv2d, nn.Conv3d)
 
+
+def _bspline_domain_from_knots(knots: torch.Tensor, degree: int) -> Tuple[float, float]:
+    """Return the effective spline domain [lo, hi] for the provided knot vector."""
+
+    if knots.numel() == 0:
+        return 0.0, 1.0
+
+    deg = max(0, int(degree))
+    if knots.numel() <= deg:
+        lo = float(knots.min().item())
+        hi = float(knots.max().item())
+        if hi <= lo:
+            hi = lo + 1.0
+        return lo, hi
+
+    lo_idx = min(knots.numel() - 1, deg)
+    hi_idx = max(lo_idx, knots.numel() - deg - 1)
+    lo = float(knots[lo_idx].item())
+    hi = float(knots[hi_idx].item())
+
+    if hi <= lo:
+        kmin = float(knots.min().item())
+        kmax = float(knots.max().item())
+        if kmax > kmin:
+            lo, hi = kmin, kmax
+        else:
+            hi = lo + 1.0
+
+    return lo, hi
+
 _DEPTH_PAT = re.compile(r"(?:layers?|blocks?|stages?|h|enc(?:oder)?|dec(?:oder)?)[._-]?(\d+)", re.IGNORECASE)
 _INT_PAT   = re.compile(r"(\d+)")
 
@@ -117,19 +147,27 @@ def _bspline_basis_all(x: torch.Tensor, degree: int, knots: torch.Tensor) -> tor
 
 def _bspline_profile_1d(length: int, degree: int, ctrl: List[float], knots=None, normalized=True, device=None) -> torch.Tensor:
     dev = device or torch.device("cpu")
-    xs = torch.linspace(0.0, 1.0, steps=max(1,int(length)), device=dev, dtype=torch.float64)
+    xs = torch.linspace(0.0, 1.0, steps=max(1, int(length)), device=dev, dtype=torch.float64)
     ctrl = torch.tensor([float(c) for c in ctrl], dtype=torch.float64, device=dev)
     if knots is None or len(knots) == 0:
-        m = (ctrl.numel()-1) + degree + 1
-        k = torch.zeros(m+1, dtype=torch.float64, device=dev)
-        k[:degree+1] = 0.0; k[-(degree+1):] = 1.0
-        if m - 2*degree > 0:
-            k[degree+1:-degree-1] = torch.linspace(0.0, 1.0, steps=m-2*degree+1, device=dev, dtype=torch.float64)[1:-1]
+        m = (ctrl.numel() - 1) + degree + 1
+        k = torch.zeros(m + 1, dtype=torch.float64, device=dev)
+        k[: degree + 1] = 0.0
+        k[-(degree + 1) :] = 1.0
+        if m - 2 * degree > 0:
+            k[degree + 1 : -degree - 1] = torch.linspace(
+                0.0,
+                1.0,
+                steps=m - 2 * degree + 1,
+                device=dev,
+                dtype=torch.float64,
+            )[1:-1]
     else:
         k = torch.tensor(knots, dtype=torch.float64, device=dev)
-        if not normalized:
-            kmin, kmax = float(k.min().item()), float(k.max().item())
-            k = (k - kmin) / max(1e-12, (kmax - kmin))
+        if not normalized and k.numel() > 0:
+            lo, hi = _bspline_domain_from_knots(k, degree)
+            if hi > lo:
+                xs = xs * (hi - lo) + lo
     B = _bspline_basis_all(xs, int(degree), k)
     y = (B @ ctrl.view(-1,1)).squeeze(1).to(torch.float32)
     return y
@@ -185,16 +223,19 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         kd = torch.zeros(m+1, dtype=torch.float64, device=dev); kd[:deg_d+1]=0.0; kd[-(deg_d+1):]=1.0
         if m - 2*deg_d > 0:
             kd[deg_d+1:-deg_d-1] = torch.linspace(0.0, 1.0, steps=m-2*deg_d+1, device=dev, dtype=torch.float64)[1:-1]
+        normalized = True
     else:
         if isinstance(kd_in, dict):
             kd = kd_in.get(key, None)
         else:
             kd = kd_in
         kd = torch.tensor(kd, dtype=torch.float64, device=dev)
-        if not normalized:
-            kmin, kmax = float(kd.min().item()), float(kd.max().item())
-            kd = (kd - kmin) / max(1e-12, (kmax - kmin))
-    Bd = _bspline_basis_all(torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev), deg_d, kd)
+    sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
+    if not normalized and kd.numel() > 0:
+        lo, hi = _bspline_domain_from_knots(kd, deg_d)
+        if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
+            sample_depth = sample_depth * (hi - lo) + lo
+    Bd = _bspline_basis_all(sample_depth, deg_d, kd)
     yd = (Bd @ ctrl_d.view(-1,1)).squeeze(1).to(torch.float32)[0]
 
     # head scalar profile
@@ -215,10 +256,11 @@ def _eval_depth_head_col_profile(c_len: int, H: int, spec: dict, key: str, depth
         else:
             kh = kh_in
         kh = torch.tensor(kh, dtype=torch.float64, device=dev)
-        if not hnorm:
-            kmin, kmax = float(kh.min().item()), float(kh.max().item())
-            kh = (kh - kmin) / max(1e-12, (kmax - kmin))
     xs_h = torch.linspace(0.0, 1.0, steps=max(1,int(H)), device=dev, dtype=torch.float64)
+    if not hnorm and kh.numel() > 0:
+        lo, hi = _bspline_domain_from_knots(kh, deg_h)
+        if hi > lo:
+            xs_h = xs_h * (hi - lo) + lo
     Bh = _bspline_basis_all(xs_h, deg_h, kh)
     yh = (Bh @ h_ctrl.view(-1,1)).squeeze(1).to(torch.float32)  # (H,)
 
@@ -309,6 +351,7 @@ def _eval_depth_col_profile(spec_map: dict, key: str, length: int, depth_norm: f
         if not isinstance(ctrl_d, (list, tuple)):
             ctrl_d = [float(ctrl_d)] * 2
         ctrl_d = torch.tensor([float(c) for c in ctrl_d], dtype=torch.float64, device=dev)
+        normalized_depth = bool(depth_spec.get("normalized", True))
         if kd is None:
             m = (ctrl_d.numel() - 1) + deg_d + 1
             kd = torch.zeros(m + 1, dtype=torch.float64, device=dev)
@@ -316,12 +359,15 @@ def _eval_depth_col_profile(spec_map: dict, key: str, length: int, depth_norm: f
             kd[-(deg_d + 1):] = 1.0
             if m - 2 * deg_d > 0:
                 kd[deg_d + 1:-deg_d - 1] = torch.linspace(0.0, 1.0, steps=m - 2 * deg_d + 1, device=dev, dtype=torch.float64)[1:-1]
+            normalized_depth = True
         else:
             kd = torch.tensor(kd, dtype=torch.float64, device=dev)
-            if not bool(depth_spec.get("normalized", True)) and kd.numel() > 0:
-                kmin, kmax = float(kd.min().item()), float(kd.max().item())
-                kd = (kd - kmin) / max(1e-12, (kmax - kmin))
-        Bd = _bspline_basis_all(torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev), deg_d, kd)
+        sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
+        if not normalized_depth and kd.numel() > 0:
+            lo, hi = _bspline_domain_from_knots(kd, deg_d)
+            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
+                sample_depth = sample_depth * (hi - lo) + lo
+        Bd = _bspline_basis_all(sample_depth, deg_d, kd)
         depth_val = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
         depth_val = torch.tensor(1.0, dtype=torch.float32, device=dev)
@@ -339,14 +385,51 @@ def _eval_spatial_profile_conv(kH: int, kW: int, spec: dict, depth_norm: float, 
     combine = str(spec.get("combine", "mul")).lower()
     depth = spec.get("depth", None)  # expects dict with degree/ctrl/knots keys
     if depth:
-        y_d = _bspline_profile_1d(1, int(depth.get("degree",1)), depth.get("ctrl",[1.0,1.0]), knots=depth.get("knots",None), device=dev)[0]
+        deg_d = int(depth.get("degree", 1))
+        ctrl_d = depth.get("ctrl", [1.0, 1.0])
+        if not isinstance(ctrl_d, (list, tuple)):
+            ctrl_d = [float(ctrl_d)] * 2
+        ctrl_d = torch.tensor([float(c) for c in ctrl_d], dtype=torch.float64, device=dev)
+        kd = depth.get("knots", None)
+        normalized_depth = bool(depth.get("normalized", True))
+        if kd is None:
+            m = (ctrl_d.numel() - 1) + deg_d + 1
+            kd = torch.zeros(m + 1, dtype=torch.float64, device=dev)
+            kd[:deg_d + 1] = 0.0
+            kd[-(deg_d + 1):] = 1.0
+            if m - 2 * deg_d > 0:
+                kd[deg_d + 1:-deg_d - 1] = torch.linspace(0.0, 1.0, steps=m - 2 * deg_d + 1, device=dev, dtype=torch.float64)[1:-1]
+            normalized_depth = True
+        else:
+            kd = torch.tensor(kd, dtype=torch.float64, device=dev)
+        sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
+        if not normalized_depth and kd.numel() > 0:
+            lo, hi = _bspline_domain_from_knots(kd, deg_d)
+            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
+                sample_depth = sample_depth * (hi - lo) + lo
+        Bd = _bspline_basis_all(sample_depth, deg_d, kd)
+        y_d = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
         y_d = torch.tensor(1.0, dtype=torch.float32, device=dev)
 
     kh_spec = spec.get("kh", {"degree":1, "ctrl":[1.0,1.0]})
     kw_spec = spec.get("kw", {"degree":1, "ctrl":[1.0,1.0]})
-    y_h = _bspline_profile_1d(kH, int(kh_spec.get("degree",1)), kh_spec.get("ctrl",[1.0,1.0]), knots=kh_spec.get("knots",None), device=dev)
-    y_w = _bspline_profile_1d(kW, int(kw_spec.get("degree",1)), kw_spec.get("ctrl",[1.0,1.0]), knots=kw_spec.get("knots",None), device=dev)
+    y_h = _bspline_profile_1d(
+        kH,
+        int(kh_spec.get("degree", 1)),
+        kh_spec.get("ctrl", [1.0, 1.0]),
+        knots=kh_spec.get("knots", None),
+        normalized=bool(kh_spec.get("normalized", True)),
+        device=dev,
+    )
+    y_w = _bspline_profile_1d(
+        kW,
+        int(kw_spec.get("degree", 1)),
+        kw_spec.get("ctrl", [1.0, 1.0]),
+        knots=kw_spec.get("knots", None),
+        normalized=bool(kw_spec.get("normalized", True)),
+        device=dev,
+    )
 
     mat = (y_h.view(kH,1) * y_w.view(1,kW)).reshape(-1).to(torch.float32)
 
@@ -376,12 +459,49 @@ def _eval_conv_row_channel_profile(out_ch: int, in_ch_g: int, spec: dict, depth_
     combine = str(spec.get("combine", "mul")).lower()
     out_sp = spec.get("out", {"degree":2,"ctrl":[1.0,1.0]})
     in_sp  = spec.get("in",  {"degree":2,"ctrl":[1.0,1.0]})
-    y_out = _bspline_profile_1d(out_ch, int(out_sp.get("degree",2)), out_sp.get("ctrl",[1.0,1.0]), knots=out_sp.get("knots",None), device=dev)
-    y_in  = _bspline_profile_1d(in_ch_g, int(in_sp.get("degree",2)),  in_sp.get("ctrl",[1.0,1.0]),  knots=in_sp.get("knots",None),  device=dev)
+    y_out = _bspline_profile_1d(
+        out_ch,
+        int(out_sp.get("degree", 2)),
+        out_sp.get("ctrl", [1.0, 1.0]),
+        knots=out_sp.get("knots", None),
+        normalized=bool(out_sp.get("normalized", True)),
+        device=dev,
+    )
+    y_in = _bspline_profile_1d(
+        in_ch_g,
+        int(in_sp.get("degree", 2)),
+        in_sp.get("ctrl", [1.0, 1.0]),
+        knots=in_sp.get("knots", None),
+        normalized=bool(in_sp.get("normalized", True)),
+        device=dev,
+    )
     mat = (y_out.view(out_ch,1) * y_in.view(1,in_ch_g)).reshape(-1).to(torch.float32)
     depth = spec.get("depth", None)
     if depth:
-        y_d = _bspline_profile_1d(1, int(depth.get("degree",1)), depth.get("ctrl",[1.0,1.0]), knots=depth.get("knots",None), device=dev)[0]
+        deg_d = int(depth.get("degree", 1))
+        ctrl_d = depth.get("ctrl", [1.0, 1.0])
+        if not isinstance(ctrl_d, (list, tuple)):
+            ctrl_d = [float(ctrl_d)] * 2
+        ctrl_d = torch.tensor([float(c) for c in ctrl_d], dtype=torch.float64, device=dev)
+        kd = depth.get("knots", None)
+        normalized_depth = bool(depth.get("normalized", True))
+        if kd is None:
+            m = (ctrl_d.numel() - 1) + deg_d + 1
+            kd = torch.zeros(m + 1, dtype=torch.float64, device=dev)
+            kd[:deg_d + 1] = 0.0
+            kd[-(deg_d + 1):] = 1.0
+            if m - 2 * deg_d > 0:
+                kd[deg_d + 1:-deg_d - 1] = torch.linspace(0.0, 1.0, steps=m - 2 * deg_d + 1, device=dev, dtype=torch.float64)[1:-1]
+            normalized_depth = True
+        else:
+            kd = torch.tensor(kd, dtype=torch.float64, device=dev)
+        sample_depth = torch.tensor([float(depth_norm)], dtype=torch.float64, device=dev)
+        if not normalized_depth and kd.numel() > 0:
+            lo, hi = _bspline_domain_from_knots(kd, deg_d)
+            if hi > lo and float(depth_norm) >= 0.0 and float(depth_norm) <= 1.0:
+                sample_depth = sample_depth * (hi - lo) + lo
+        Bd = _bspline_basis_all(sample_depth, deg_d, kd)
+        y_d = (Bd @ ctrl_d.view(-1, 1)).squeeze(1).to(torch.float32)[0]
     else:
         y_d = torch.tensor(1.0, dtype=torch.float32, device=dev)
     vec = mat * y_d if combine == "mul" else (mat + y_d)
