@@ -164,3 +164,59 @@ def test_eval_conv_row_channel_profile_skips_rescale_for_absolute_depth_input():
 
     expected = torch.tensor([1.5 * 2.0 * depth_val], dtype=torch.float32)
     torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
+
+
+def test_eval_spatial_profile_conv_accepts_tensor_ctrl_and_normalized_dict():
+    spec = {
+        "min": 0.0,
+        "max": 10.0,
+        "combine": "mul",
+        "depth": {
+            "degree": 1,
+            "ctrl": torch.tensor([1.0, 2.0]),
+            "knots": torch.tensor([0.0, 1.0, 2.0, 3.0]),
+            "normalized": {"default": False},
+        },
+        "kh": {"degree": 0, "ctrl": torch.tensor([1.5]), "normalized": {"default": True}},
+        "kw": {"degree": 0, "ctrl": [2.0], "normalized": {"default": True}},
+    }
+    depth_norm = 2.5
+    result = _eval_spatial_profile_conv(1, 1, spec, depth_norm)
+
+    depth_knots = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+    depth_ctrl = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    depth_sample = torch.tensor([depth_norm], dtype=torch.float64)
+    depth_basis = _bspline_basis_all(depth_sample, 1, depth_knots)
+    depth_val = (depth_basis @ depth_ctrl.view(-1, 1)).squeeze(1).to(torch.float32)[0]
+
+    expected = torch.tensor([1.5 * 2.0], dtype=torch.float32) * depth_val
+    torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
+
+
+def test_eval_conv_row_channel_profile_supports_default_dict_depth_specs():
+    spec = {
+        "min": 0.0,
+        "max": 5.0,
+        "out": {"degree": 0, "ctrl": torch.tensor([1.0]), "normalized": True},
+        "in": {"degree": 0, "ctrl": [2.0], "normalized": {"default": True}},
+        "depth": {
+            "degree": 1,
+            "ctrl": {"default": torch.tensor([1.0, 2.0])},
+            "knots": {"default": torch.tensor([0.0, 1.0, 2.0, 3.0])},
+            "normalized": {"default": False},
+        },
+        "combine": "mul",
+    }
+    depth_norm = 2.5
+    result = _eval_conv_row_channel_profile(1, 1, spec, depth_norm)
+
+    out_vals = torch.tensor([1.0], dtype=torch.float32)
+    in_vals = torch.tensor([2.0], dtype=torch.float32)
+    depth_knots = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64)
+    depth_ctrl = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    depth_sample = torch.tensor([depth_norm], dtype=torch.float64)
+    depth_basis = _bspline_basis_all(depth_sample, 1, depth_knots)
+    depth_val = (depth_basis @ depth_ctrl.view(-1, 1)).squeeze(1).to(torch.float32)[0]
+
+    expected = (out_vals.view(-1, 1) * in_vals.view(1, -1)).reshape(-1) * depth_val
+    torch.testing.assert_close(result, expected.clamp(spec["min"], spec["max"]))
