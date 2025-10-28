@@ -23,6 +23,34 @@ def test_bspline_profile_1d_non_normalized_knots():
     torch.testing.assert_close(result, expected)
 
 
+def test_bspline_profile_1d_handles_nested_normalized_dict_with_key():
+    knots = [0.0, 0.5, 1.5, 2.0]
+    ctrl = [0.0, 1.0]
+    normalized = {"kh": {"default": False}, "default": True}
+    result = _bspline_profile_1d(4, 1, ctrl, knots=knots, normalized=normalized, key="kh")
+
+    knot_tensor = torch.tensor(knots, dtype=torch.float64)
+    lo, hi = _bspline_domain_from_knots(knot_tensor, 1)
+    xs = torch.linspace(lo, hi, steps=4, dtype=torch.float64)
+    basis = _bspline_basis_all(xs, 1, knot_tensor)
+    expected = (basis @ torch.tensor(ctrl, dtype=torch.float64).view(-1, 1)).squeeze(1).to(torch.float32)
+    torch.testing.assert_close(result, expected)
+
+
+def test_bspline_profile_1d_handles_nested_default_normalized_dict():
+    knots = [0.0, 0.5, 1.5, 2.0]
+    ctrl = [0.0, 1.0]
+    normalized = {"default": {"default": False}}
+    result = _bspline_profile_1d(4, 1, ctrl, knots=knots, normalized=normalized, key="kw")
+
+    knot_tensor = torch.tensor(knots, dtype=torch.float64)
+    lo, hi = _bspline_domain_from_knots(knot_tensor, 1)
+    xs = torch.linspace(lo, hi, steps=4, dtype=torch.float64)
+    basis = _bspline_basis_all(xs, 1, knot_tensor)
+    expected = (basis @ torch.tensor(ctrl, dtype=torch.float64).view(-1, 1)).squeeze(1).to(torch.float32)
+    torch.testing.assert_close(result, expected)
+
+
 def test_eval_spatial_profile_conv_honors_normalized_and_depth_norm():
     spec = {
         "min": 0.0,

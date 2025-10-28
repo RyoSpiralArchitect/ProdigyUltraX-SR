@@ -120,9 +120,9 @@ def _resolve_flag_spec(flag, *, key: Optional[str] = None, default: bool = True)
 
     if isinstance(flag, dict):
         if key is not None and key in flag:
-            return bool(flag[key])
+            return _resolve_flag_spec(flag[key], key=None, default=default)
         if "default" in flag:
-            return bool(flag["default"])
+            return _resolve_flag_spec(flag["default"], key=None, default=default)
         return bool(default)
     if flag is None:
         return bool(default)
