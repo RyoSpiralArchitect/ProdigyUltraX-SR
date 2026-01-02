@@ -371,6 +371,106 @@ def _resolve_per_key_spec(spec_map, key: str):
     resolved.update(override)
     return resolved
 
+
+def _eval_head_col_beta2_cached(
+    state: dict,
+    key: str,
+    length: int,
+    heads: int,
+    depth_norm: float,
+    spec,
+    reg_map,
+    device: torch.device,
+) -> torch.Tensor:
+    cache = state.setdefault("_head_col_cache", {})
+    ck = (key, int(length), int(heads), round(float(depth_norm), 6))
+    cached = cache.get(ck, None)
+    if cached is not None and cached.device == device:
+        return cached
+
+    vec = _eval_depth_head_col_profile(length, heads, spec, key, depth_norm, device=device)
+    reg_spec = (reg_map or {}).get(key, None)
+    if reg_spec is not None:
+        spec_bounds = _resolve_per_key_spec(spec, key)
+        lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+        vec = _regularize_field_1d(vec, lo_b2, hi_b2, reg_spec)
+    vec = vec.to(device=device)
+    cache[ck] = vec
+    return vec
+
+
+def _eval_depth_col_beta2_cached(
+    state: dict,
+    key: str,
+    length: int,
+    depth_norm: float,
+    spec,
+    reg_map,
+    device: torch.device,
+) -> torch.Tensor:
+    cache = state.setdefault("_col_cache", {})
+    ck = (key, int(length), round(float(depth_norm), 6))
+    cached = cache.get(ck, None)
+    if cached is not None and cached.device == device:
+        return cached
+
+    vec = _eval_depth_col_profile(spec, key, length, depth_norm, device=device)
+    reg_spec = (reg_map or {}).get(key, None)
+    if reg_spec is not None:
+        spec_bounds = _resolve_per_key_spec(spec, key)
+        lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
+        vec = _regularize_field_1d(vec, lo_b2, hi_b2, reg_spec)
+    vec = vec.to(device=device)
+    cache[ck] = vec
+    return vec
+
+
+def _eval_conv_spatial_beta2_cached(
+    state: dict,
+    kH: int,
+    kW: int,
+    spec: dict,
+    depth_norm: float,
+    dilation: Tuple[int, int],
+    reg_spec: Optional[dict],
+    device: torch.device,
+) -> torch.Tensor:
+    cache = state.setdefault("_conv_spatial_cache", {})
+    ck = (int(kH), int(kW), tuple(int(d) for d in dilation), round(float(depth_norm), 6))
+    cached = cache.get(ck, None)
+    if cached is not None and cached.device == device:
+        return cached
+
+    vec = _eval_spatial_profile_conv(kH, kW, spec, depth_norm, dilation=dilation, device=device)
+    if reg_spec is not None:
+        vec = _regularize_field_1d(vec, float(spec.get("min", 0.95)), float(spec.get("max", 0.9999)), reg_spec)
+    vec = vec.to(device=device)
+    cache[ck] = vec
+    return vec
+
+
+def _eval_conv_channel_beta2_cached(
+    state: dict,
+    out_ch: int,
+    in_ch_g: int,
+    spec: dict,
+    depth_norm: float,
+    reg_spec: Optional[dict],
+    device: torch.device,
+) -> torch.Tensor:
+    cache = state.setdefault("_conv_channel_cache", {})
+    ck = (int(out_ch), int(in_ch_g), round(float(depth_norm), 6))
+    cached = cache.get(ck, None)
+    if cached is not None and cached.device == device:
+        return cached
+
+    vec = _eval_conv_row_channel_profile(out_ch, in_ch_g, spec, depth_norm, device=device)
+    if reg_spec is not None:
+        vec = _regularize_field_1d(vec, float(spec.get("min", 0.95)), float(spec.get("max", 0.9999)), reg_spec)
+    vec = vec.to(device=device)
+    cache[ck] = vec
+    return vec
+
 # ─────────────────────────────────────────────────────────────────────────────
 # β2 column head-aware profiles
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1054,22 +1154,11 @@ class ProdigyUltra(Optimizer):
                     key = keys[idx]
                     if dim == 1 and qkv_b2_value_head_col_spec is not None:
                         H = max(1, int(attn_heads))
-                        vec = _eval_depth_head_col_profile(gfc.shape[1], H, qkv_b2_value_head_col_spec, key, depth_norm, device=gfc.device)
-                        # optional per-head REG for columns（L2/TV 同一係数で OK）
-                        reg_head = (qkv_b2_reg_head_col_map or {}).get(key, None)
-                        if reg_head is not None:
-                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_head_col_spec, key)
-                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
-                            vec = _regularize_field_1d(vec, lo_b2, hi_b2, reg_head)
+                        vec = _eval_head_col_beta2_cached(state, key, gfc.shape[1], H, depth_norm, qkv_b2_value_head_col_spec, qkv_b2_reg_head_col_map, gfc.device)
                         vc.mul_(vec).addcmul_(gfc, gfc, value=(1.0 - vec))
                         out = gfc / (vc.sqrt() + eps2)
                     elif dim == 1 and qkv_b2_value_col_spec is not None:
-                        b2_vec = _eval_depth_col_profile(qkv_b2_value_col_spec, key, gfc.shape[1], depth_norm, device=gfc.device)
-                        reg_spec = (qkv_b2_reg_col_spec or {}).get(key, None)
-                        if reg_spec is not None:
-                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_col_spec, key)
-                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
-                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_spec)
+                        b2_vec = _eval_depth_col_beta2_cached(state, key, gfc.shape[1], depth_norm, qkv_b2_value_col_spec, qkv_b2_reg_col_spec, gfc.device)
                         vc.mul_(b2_vec).addcmul_(gfc, gfc, value=(1.0 - b2_vec))
                         out = gfc / (vc.sqrt() + eps2)
                     elif qkv_b2_field and key in qkv_b2_field:
@@ -1138,20 +1227,10 @@ class ProdigyUltra(Optimizer):
                     key = keys[idx]
                     if qkv_b2_value_head_col_spec is not None:
                         H = max(1, int(attn_heads))
-                        b2_vec = _eval_depth_head_col_profile(ecol-scol, H, qkv_b2_value_head_col_spec, key, depth_norm, device=vc.device)
-                        reg_head = (qkv_b2_reg_head_col_map or {}).get(key, None)
-                        if reg_head is not None:
-                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_head_col_spec, key)
-                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
-                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_head)
+                        b2_vec = _eval_head_col_beta2_cached(state, key, ecol-scol, H, depth_norm, qkv_b2_value_head_col_spec, qkv_b2_reg_head_col_map, vc.device)
                         vc[scol:ecol] = vc[scol:ecol] * b2_vec + mean_c[scol:ecol] * (1.0 - b2_vec)
                     elif qkv_b2_value_col_spec is not None:
-                        b2_vec = _eval_depth_col_profile(qkv_b2_value_col_spec, key, ecol-scol, depth_norm, device=vc.device)
-                        reg_spec = (qkv_b2_reg_col_spec or {}).get(key, None)
-                        if reg_spec is not None:
-                            spec_bounds = _resolve_per_key_spec(qkv_b2_value_col_spec, key)
-                            lo_b2, hi_b2 = _beta2_bounds(spec_bounds)
-                            b2_vec = _regularize_field_1d(b2_vec, lo_b2, hi_b2, reg_spec)
+                        b2_vec = _eval_depth_col_beta2_cached(state, key, ecol-scol, depth_norm, qkv_b2_value_col_spec, qkv_b2_reg_col_spec, vc.device)
                         vc[scol:ecol] = vc[scol:ecol] * b2_vec + mean_c[scol:ecol] * (1.0 - b2_vec)
                     elif qkv_b2_field and key in qkv_b2_field:
                         spec = qkv_b2_field[key]; reg = (qkv_b2_reg or {}).get(key, None)
@@ -1171,18 +1250,14 @@ class ProdigyUltra(Optimizer):
                 dil = tuple(meta.get("dilation", (1,1)))
                 in_ch_g = max(1, in_ch // groups)
                 if conv_channel_value_spec is not None:
-                    b2_row = _eval_conv_row_channel_profile(out_ch, in_ch_g, conv_channel_value_spec, depth_norm, device=vr.device)
-                    if conv_channel_reg_spec is not None:
-                        b2_row = _regularize_field_1d(b2_row, float(conv_channel_value_spec.get("min",0.95)), float(conv_channel_value_spec.get("max",0.9999)), conv_channel_reg_spec)
+                    b2_row = _eval_conv_channel_beta2_cached(state, out_ch, in_ch_g, conv_channel_value_spec, depth_norm, conv_channel_reg_spec, vr.device)
                     vr.mul_(b2_row).add_(mean_r, alpha=(1.0 - b2_row))
                 else:
                     vr.mul_(beta2).add_(mean_r, alpha=(1.0 - beta2))
 
                 if conv_spatial_value_spec is not None:
                     kH = int(ksize[0]); kW = int(ksize[1] if len(ksize) > 1 else 1)
-                    b2_col = _eval_spatial_profile_conv(kH, kW, conv_spatial_value_spec, depth_norm, dilation=dil, device=vc.device)
-                    if conv_spatial_reg_spec is not None:
-                        b2_col = _regularize_field_1d(b2_col, float(conv_spatial_value_spec.get("min",0.95)), float(conv_spatial_value_spec.get("max",0.9999)), conv_spatial_reg_spec)
+                    b2_col = _eval_conv_spatial_beta2_cached(state, kH, kW, conv_spatial_value_spec, depth_norm, dil, conv_spatial_reg_spec, vc.device)
                     vc.mul_(b2_col).add_(mean_c, alpha=(1.0 - b2_col))
                 else:
                     vc.mul_(beta2).add_(mean_c, alpha=(1.0 - beta2))
